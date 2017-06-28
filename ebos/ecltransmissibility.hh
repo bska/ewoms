@@ -229,29 +229,32 @@ private:
     {
         const auto& eclState = vanguard_.eclState();
         const auto& cartMapper = vanguard_.cartesianIndexMapper();
-        const auto& eclGrid = eclState.getInputGrid();
         auto& transMult = eclState.getTransMult();
-
-        // calculate the axis specific centroids of all elements
-        std::array<std::vector<DimVector>, dimWorld> axisCentroids;
-
-        for (unsigned dimIdx = 0; dimIdx < dimWorld; ++dimIdx)
-            axisCentroids[dimIdx].resize(numElements);
 
         auto elemIt = gridView.template begin</*codim=*/ 0>();
         const auto& elemEndIt = gridView.template end</*codim=*/ 0>();
-        for (; elemIt != elemEndIt; ++elemIt) {
-            const auto& elem = *elemIt;
-            unsigned elemIdx = elemMapper.index(elem);
 
-            // compute the axis specific "centroids" used for the transmissibilities. for
-            // consistency with the flow simulator, we use the element centers as
-            // computed by opm-parser's Opm::EclipseGrid class for all axes.
-            unsigned cartesianCellIdx = cartMapper.cartesianIndex(elemIdx);
-            const auto& centroid = eclGrid.getCellCenter(cartesianCellIdx);
-            for (unsigned axisIdx = 0; axisIdx < dimWorld; ++axisIdx)
-                for (unsigned dimIdx = 0; dimIdx < dimWorld; ++dimIdx)
-                    axisCentroids[axisIdx][elemIdx][dimIdx] = centroid[dimIdx];
+        // calculate the axis specific centroids of all elements
+        std::array<std::vector<DimVector>, dimWorld> axisCentroids;
+        {
+            const auto& eclGrid = eclState.getInputGrid();
+
+            for (unsigned dimIdx = 0; dimIdx < dimWorld; ++dimIdx)
+                axisCentroids[dimIdx].resize(numElements);
+
+            for (; elemIt != elemEndIt; ++elemIt) {
+                const auto& elem = *elemIt;
+                unsigned elemIdx = elemMapper.index(elem);
+
+                // compute the axis specific "centroids" used for the transmissibilities. for
+                // consistency with the flow simulator, we use the element centers as
+                // computed by opm-parser's Opm::EclipseGrid class for all axes.
+                unsigned cartesianCellIdx = cartMapper.cartesianIndex(elemIdx);
+                const auto& centroid = eclGrid.getCellCenter(cartesianCellIdx);
+                for (unsigned axisIdx = 0; axisIdx < dimWorld; ++axisIdx)
+                    for (unsigned dimIdx = 0; dimIdx < dimWorld; ++dimIdx)
+                        axisCentroids[axisIdx][elemIdx][dimIdx] = centroid[dimIdx];
+            }
         }
 
         // compute the transmissibilities for all intersections
