@@ -126,24 +126,96 @@ public:
     void update()
     {
         const auto& gridView = vanguard_.gridView();
-        const auto& cartMapper = vanguard_.cartesianIndexMapper();
-        const auto& eclState = vanguard_.eclState();
-        const auto& eclGrid = eclState.getInputGrid();
-        const auto& cartDims = cartMapper.cartesianDimensions();
-        auto& transMult = eclState.getTransMult();
+
 #if DUNE_VERSION_NEWER(DUNE_GRID, 2,6)
-        ElementMapper elemMapper(gridView, Dune::mcmgElementLayout());
+        const ElementMapper elemMapper(gridView, Dune::mcmgElementLayout());
 #else
-        ElementMapper elemMapper(gridView);
+        const ElementMapper elemMapper(gridView);
 #endif
 
+        const unsigned numElements = elemMapper.size();
+
+        const std::vector<double> ntg = this->prepareTranCalc_(numElements);
+
+        this->computeTrans_NewTran_(gridView, elemMapper, numElements, ntg);
+    }
+
+    /*!
+     * \brief Return the permeability for an element.
+     */
+    const DimMatrix& permeability(unsigned elemIdx) const
+    { return permeability_[elemIdx]; }
+
+    /*!
+     * \brief Return the transmissibility for the intersection between two elements.
+     */
+    Scalar transmissibility(unsigned elemIdx1, unsigned elemIdx2) const
+    { return trans_.at(isId_(elemIdx1, elemIdx2)); }
+
+    /*!
+     * \brief Return the transmissibility for a given boundary segment.
+     */
+    Scalar transmissibilityBoundary(unsigned elemIdx, unsigned boundaryFaceIdx) const
+    { return transBoundary_.at(std::make_pair(elemIdx, boundaryFaceIdx)); }
+
+    /*!
+     * \brief Return the thermal "half transmissibility" for the intersection between two
+     *        elements.
+     *
+     * The "half transmissibility" features all sub-expressions of the "thermal
+     * transmissibility" which can be precomputed, i.e. they are not dependent on the
+     * current solution:
+     *
+     * H_t = A * (n*d)/(d*d);
+     *
+     * where A is the area of the intersection between the inside and outside elements, n
+     * is the outer unit normal, and d is the distance between the center of the inside
+     * cell and the center of the intersection.
+     */
+    Scalar thermalHalfTrans(unsigned insideElemIdx, unsigned outsideElemIdx) const
+    { return thermalHalfTrans_->at(directionalIsId_(insideElemIdx, outsideElemIdx)); }
+
+    Scalar thermalHalfTransBoundary(unsigned insideElemIdx, unsigned boundaryFaceIdx) const
+    { return thermalHalfTransBoundary_.at(std::make_pair(insideElemIdx, boundaryFaceIdx)); }
+
+private:
+    std::vector<double> prepareTranCalc_(const unsigned numElements)
+    {
         // get the ntg values, the ntg values are modified for the cells merged with minpv
         std::vector<double> ntg;
         minPvFillNtg_(ntg);
 
-        unsigned numElements = elemMapper.size();
-
         extractPermeability_();
+
+        // reserving some space in the hashmap upfront saves quite a bit of time because
+        // resizes are costly for hashmaps and there would be quite a few of them if we
+        // would not have a rough idea of how large the final map will be (the rough idea
+        // is a conforming Cartesian grid).
+        trans_.clear();
+        trans_.reserve(numElements*3*1.05);
+
+        transBoundary_.clear();
+
+        // if energy is enabled, let's do the same for the "thermal half transmissibilities"
+        if (enableEnergy) {
+            thermalHalfTrans_->clear();
+            thermalHalfTrans_->reserve(numElements*6*1.05);
+
+            thermalHalfTransBoundary_.clear();
+        }
+
+        return ntg;
+    }
+
+    void computeTrans_NewTran_(const GridView& gridView,
+                               const ElementMapper& elemMapper,
+                               const unsigned int numElements,
+                               const std::vector<double>& ntg)
+    {
+        const auto& eclState = vanguard_.eclState();
+        const auto& cartMapper = vanguard_.cartesianIndexMapper();
+        const auto& eclGrid = eclState.getInputGrid();
+        auto& transMult = eclState.getTransMult();
 
         // calculate the axis specific centroids of all elements
         std::array<std::vector<DimVector>, dimWorld> axisCentroids;
@@ -165,23 +237,6 @@ public:
             for (unsigned axisIdx = 0; axisIdx < dimWorld; ++axisIdx)
                 for (unsigned dimIdx = 0; dimIdx < dimWorld; ++dimIdx)
                     axisCentroids[axisIdx][elemIdx][dimIdx] = centroid[dimIdx];
-        }
-
-        // reserving some space in the hashmap upfront saves quite a bit of time because
-        // resizes are costly for hashmaps and there would be quite a few of them if we
-        // would not have a rough idea of how large the final map will be (the rough idea
-        // is a conforming Cartesian grid).
-        trans_.clear();
-        trans_.reserve(numElements*3*1.05);
-
-        transBoundary_.clear();
-
-        // if energy is enabled, let's do the same for the "thermal half transmissibilities"
-        if (enableEnergy) {
-            thermalHalfTrans_->clear();
-            thermalHalfTrans_->reserve(numElements*6*1.05);
-
-            thermalHalfTransBoundary_.clear();
         }
 
         // compute the transmissibilities for all intersections
@@ -397,45 +452,14 @@ public:
         removeSmallNonCartesianTransmissibilities_();
     }
 
-    /*!
-     * \brief Return the permeability for an element.
-     */
-    const DimMatrix& permeability(unsigned elemIdx) const
-    { return permeability_[elemIdx]; }
-
-    /*!
-     * \brief Return the transmissibility for the intersection between two elements.
-     */
-    Scalar transmissibility(unsigned elemIdx1, unsigned elemIdx2) const
-    { return trans_.at(isId_(elemIdx1, elemIdx2)); }
-
-    /*!
-     * \brief Return the transmissibility for a given boundary segment.
-     */
-    Scalar transmissibilityBoundary(unsigned elemIdx, unsigned boundaryFaceIdx) const
-    { return transBoundary_.at(std::make_pair(elemIdx, boundaryFaceIdx)); }
-
-    /*!
-     * \brief Return the thermal "half transmissibility" for the intersection between two
-     *        elements.
-     *
-     * The "half transmissibility" features all sub-expressions of the "thermal
-     * transmissibility" which can be precomputed, i.e. they are not dependent on the
-     * current solution:
-     *
-     * H_t = A * (n*d)/(d*d);
-     *
-     * where A is the area of the intersection between the inside and outside elements, n
-     * is the outer unit normal, and d is the distance between the center of the inside
-     * cell and the center of the intersection.
-     */
-    Scalar thermalHalfTrans(unsigned insideElemIdx, unsigned outsideElemIdx) const
-    { return thermalHalfTrans_->at(directionalIsId_(insideElemIdx, outsideElemIdx)); }
-
-    Scalar thermalHalfTransBoundary(unsigned insideElemIdx, unsigned boundaryFaceIdx) const
-    { return thermalHalfTransBoundary_.at(std::make_pair(insideElemIdx, boundaryFaceIdx)); }
-
-private:
+    void computeTrans_OldTran_Radial_(const GridView& gridView,
+                                      const ElementMapper& elemMapper,
+                                      const unsigned int numElements,
+                                      const std::vector<double>& ntg)
+    {
+        this->computeTrans_OldTran_Radial_(typename std::is_same<Grid, Dune::CpGrid>::type{},
+                                           gridView, elemMapper, numElements, ntg);
+    }
 
     void removeSmallNonCartesianTransmissibilities_()
     {
