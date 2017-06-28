@@ -762,6 +762,12 @@ private:
 
     void extractPermeability_()
     {
+        const auto isRadial = this->gridIsRadial_();
+
+        const std::string k00_kw = isRadial ? "PERMR"   : "PERMX";
+        const std::string k11_kw = isRadial ? "PERMTHT" : "PERMY";
+        const std::string k22_kw =            "PERMZ";
+
         const auto& props = vanguard_.eclState().get3DProperties();
 
         unsigned numElem = vanguard_.gridView().size(/*codim=*/0);
@@ -771,22 +777,20 @@ private:
         // provided by eclState are one-per-cell of "uncompressed" grid, whereas the
         // simulation grid might remove a few elements. (e.g. because it is distributed
         // over several processes.)
-        if (props.hasDeckDoubleGridProperty("PERMX")) {
-            const std::vector<double>& permxData =
-                props.getDoubleGridProperty("PERMX").getData();
-            std::vector<double> permyData(permxData);
-            if (props.hasDeckDoubleGridProperty("PERMY"))
-                permyData = props.getDoubleGridProperty("PERMY").getData();
-            std::vector<double> permzData(permxData);
-            if (props.hasDeckDoubleGridProperty("PERMZ"))
-                permzData = props.getDoubleGridProperty("PERMZ").getData();
+        if (props.hasDeckDoubleGridProperty(k00_kw)) {
+            const std::vector<double>& K00_Data =
+                props.getDoubleGridProperty(k00_kw).getData();
+            const std::vector<double>& K11_Data = props.hasDeckDoubleGridProperty(k11_kw)
+                ? props.getDoubleGridProperty(k11_kw).getData() : K00_Data;
+            const std::vector<double>& K22_Data = props.hasDeckDoubleGridProperty(k22_kw)
+                ? props.getDoubleGridProperty(k22_kw).getData() : K00_Data;
 
             for (size_t dofIdx = 0; dofIdx < numElem; ++ dofIdx) {
                 unsigned cartesianElemIdx = vanguard_.cartesianIndex(dofIdx);
                 permeability_[dofIdx] = 0.0;
-                permeability_[dofIdx][0][0] = permxData[cartesianElemIdx];
-                permeability_[dofIdx][1][1] = permyData[cartesianElemIdx];
-                permeability_[dofIdx][2][2] = permzData[cartesianElemIdx];
+                permeability_[dofIdx][0][0] = K00_Data[cartesianElemIdx];
+                permeability_[dofIdx][1][1] = K11_Data[cartesianElemIdx];
+                permeability_[dofIdx][2][2] = K22_Data[cartesianElemIdx];
             }
 
             // for now we don't care about non-diagonal entries
@@ -961,6 +965,25 @@ private:
             averageNtg[cartesianCellIdx] = ntgCellVolume / totalCellVolume;
         }
     }
+
+
+    bool gridIsRadial_() const
+    {
+        return this->gridIsRadial_(typename std::is_same<Grid, Dune::CpGrid>::type{});
+    }
+
+
+    bool gridIsRadial_(std::false_type /* !CpGrid */) const
+    {
+        return false;
+    }
+
+
+    bool gridIsRadial_(std::true_type /* CpGrid */) const
+    {
+        return this->vanguard_.eclState().getInputGrid().isRadial();
+    }
+
 
     const Vanguard& vanguard_;
     Scalar transmissibilityThreshold_;
