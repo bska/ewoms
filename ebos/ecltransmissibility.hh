@@ -179,6 +179,20 @@ public:
     { return thermalHalfTransBoundary_.at(std::make_pair(insideElemIdx, boundaryFaceIdx)); }
 
 private:
+    struct EntityID
+    {
+        template <class Entity, class CartMapper>
+        EntityID(const Entity&        entity,
+                 const ElementMapper& elemMapper,
+                 const CartMapper&    cartMapper)
+            : elemIdx(elemMapper.index(entity))
+            , cartElemIdx(cartMapper.cartesianIndex(elemIdx))
+        {}
+
+        unsigned int elemIdx;
+        unsigned int cartElemIdx;
+    };
+
     std::vector<double> prepareTranCalc_(const unsigned numElements)
     {
         // get the ntg values, the ntg values are modified for the cells merged with minpv
@@ -301,8 +315,8 @@ private:
                     // domain boundary yet they don't have neighbors.
                     continue;
 
-                const auto& outsideElem = intersection.outside();
-                unsigned outsideElemIdx = elemMapper.index(outsideElem);
+                const auto inside = EntityID(intersection.inside(), elemMapper, cartMapper);
+                const auto outside = EntityID(intersection.outside(), elemMapper, cartMapper);
 
                 // update the "thermal half transmissibility" for the intersection
                 if (enableEnergy) {
@@ -313,17 +327,14 @@ private:
                     const auto& outPos = intersection.geometry().center();
                     const auto& d = outPos - inPos;
 
-                    (*thermalHalfTrans_)[directionalIsId_(elemIdx, outsideElemIdx)] =
+                    (*thermalHalfTrans_)[directionalIsId_(inside.elemIdx, outside.elemIdx)] =
                         A * (n*d)/(d*d);
                 }
 
                 // we only need to calculate a face's transmissibility
                 // once...
-                if (elemIdx > outsideElemIdx)
+                if (inside.elemIdx > outside.elemIdx)
                     continue;
-
-                unsigned insideCartElemIdx = cartMapper.cartesianIndex(elemIdx);
-                unsigned outsideCartElemIdx = cartMapper.cartesianIndex(outsideElemIdx);
 
                 // local indices of the faces of the inside and
                 // outside elements which contain the intersection
@@ -344,9 +355,9 @@ private:
 
                 typename std::is_same<Grid, Dune::CpGrid>::type isCpGrid;
                 computeFaceProperties(intersection,
-                                      elemIdx,
+                                      inside.elemIdx,
                                       insideFaceIdx,
-                                      outsideElemIdx,
+                                      outside.elemIdx,
                                       outsideFaceIdx,
                                       faceCenterInside,
                                       faceCenterOutside,
@@ -360,21 +371,21 @@ private:
                                   faceAreaNormal,
                                   insideFaceIdx,
                                   distanceVector_(faceCenterInside,
-                                                  intersection.indexInInside(),
-                                                  elemIdx,
+                                                  insideFaceIdx,
+                                                  inside.elemIdx,
                                                   axisCentroids),
-                                  permeability_[elemIdx]);
+                                  permeability_[inside.elemIdx]);
                 computeHalfTrans_(halfTrans2,
                                   faceAreaNormal,
                                   outsideFaceIdx,
                                   distanceVector_(faceCenterOutside,
-                                                  intersection.indexInOutside(),
-                                                  outsideElemIdx,
+                                                  outsideFaceIdx,
+                                                  outside.elemIdx,
                                                   axisCentroids),
-                                  permeability_[outsideElemIdx]);
+                                  permeability_[outside.elemIdx]);
 
-                applyNtg_(halfTrans1, insideFaceIdx, insideCartElemIdx, ntg);
-                applyNtg_(halfTrans2, outsideFaceIdx, outsideCartElemIdx, ntg);
+                applyNtg_(halfTrans1, insideFaceIdx, inside.cartElemIdx, ntg);
+                applyNtg_(halfTrans2, outsideFaceIdx, outside.cartElemIdx, ntg);
 
                 // convert half transmissibilities to full face
                 // transmissibilities using the harmonic mean
@@ -393,11 +404,11 @@ private:
                 // Default is to apply the top and bottom multiplier
                 bool useSmallestMultiplier = eclGrid.getMultzOption() == Opm::PinchMode::ModeEnum::ALL;
                 if (useSmallestMultiplier)
-                    applyAllZMultipliers_(trans, insideFaceIdx, insideCartElemIdx, outsideCartElemIdx, transMult, cartDims);
+                    applyAllZMultipliers_(trans, insideFaceIdx, inside.cartElemIdx, outside.cartElemIdx, transMult, cartDims);
                 else
-                    applyMultipliers_(trans, insideFaceIdx, insideCartElemIdx, transMult);
+                    applyMultipliers_(trans, insideFaceIdx, inside.cartElemIdx, transMult);
                 // ... and outside elements
-                applyMultipliers_(trans, outsideFaceIdx, outsideCartElemIdx, transMult);
+                applyMultipliers_(trans, outsideFaceIdx, outside.cartElemIdx, transMult);
 
                 // apply the region multipliers (cf. the MULTREGT keyword)
                 Opm::FaceDir::DirEnum faceDir;
@@ -421,11 +432,11 @@ private:
                     throw std::logic_error("Could not determine a face direction");
                 }
 
-                trans *= transMult.getRegionMultiplier(insideCartElemIdx,
-                                                       outsideCartElemIdx,
+                trans *= transMult.getRegionMultiplier(inside.cartElemIdx,
+                                                       outside.cartElemIdx,
                                                        faceDir);
 
-                trans_[isId_(elemIdx, outsideElemIdx)] = trans;
+                trans_[isId_(inside.elemIdx, outside.elemIdx)] = trans;
             }
         }
 
