@@ -51,6 +51,7 @@
 #include <array>
 #include <vector>
 #include <unordered_map>
+#include <utility>
 
 BEGIN_PROPERTIES
 
@@ -384,59 +385,14 @@ private:
                                                   axisCentroids),
                                   permeability_[outside.elemIdx]);
 
-                applyNtg_(halfTrans1, insideFaceIdx, inside.cartElemIdx, ntg);
-                applyNtg_(halfTrans2, outsideFaceIdx, outside.cartElemIdx, ntg);
-
                 // convert half transmissibilities to full face
-                // transmissibilities using the harmonic mean
-                Scalar trans;
-                if (std::abs(halfTrans1) < 1e-30 || std::abs(halfTrans2) < 1e-30)
-                    // avoid division by zero
-                    trans = 0.0;
-                else
-                    trans = 1.0 / (1.0/halfTrans1 + 1.0/halfTrans2);
-
-                // apply the full face transmissibility multipliers
-                // for the inside ...
-
-                // The MULTZ needs special case if the option is ALL
-                // Then the smallest multiplier is applied.
-                // Default is to apply the top and bottom multiplier
-                bool useSmallestMultiplier = eclGrid.getMultzOption() == Opm::PinchMode::ModeEnum::ALL;
-                if (useSmallestMultiplier)
-                    applyAllZMultipliers_(trans, insideFaceIdx, inside.cartElemIdx, outside.cartElemIdx, transMult, cartDims);
-                else
-                    applyMultipliers_(trans, insideFaceIdx, inside.cartElemIdx, transMult);
-                // ... and outside elements
-                applyMultipliers_(trans, outsideFaceIdx, outside.cartElemIdx, transMult);
-
-                // apply the region multipliers (cf. the MULTREGT keyword)
-                Opm::FaceDir::DirEnum faceDir;
-                switch (insideFaceIdx) {
-                case 0:
-                case 1:
-                    faceDir = Opm::FaceDir::XPlus;
-                    break;
-
-                case 2:
-                case 3:
-                    faceDir = Opm::FaceDir::YPlus;
-                    break;
-
-                case 4:
-                case 5:
-                    faceDir = Opm::FaceDir::ZPlus;
-                    break;
-
-                default:
-                    throw std::logic_error("Could not determine a face direction");
-                }
-
-                trans *= transMult.getRegionMultiplier(inside.cartElemIdx,
-                                                       outside.cartElemIdx,
-                                                       faceDir);
-
-                trans_[isId_(inside.elemIdx, outside.elemIdx)] = trans;
+                // transmissibilities using the harmonic mean.  Assign
+                // result to appropriate location in 'trans_'.
+                computeFullTrans_(std::move(halfTrans1),
+                                  std::move(halfTrans2),
+                                  inside, insideFaceIdx,
+                                  outside, outsideFaceIdx,
+                                  transMult, ntg);
             }
         }
 
@@ -852,6 +808,69 @@ private:
 
         halfTrans *= std::abs(val);
         halfTrans /= distance.two_norm2();
+    }
+
+    template <class TransMultipliers>
+    void computeFullTrans_(Scalar&& halfTrans1,
+                           Scalar&& halfTrans2,
+                           const EntityID& inside,
+                           const unsigned int insideFaceIdx,
+                           const EntityID& outside,
+                           const unsigned int outsideFaceIdx,
+                           const TransMultipliers& transMult,
+                           const std::vector<double>& ntg)
+    {
+        applyNtg_(halfTrans1, insideFaceIdx, inside.cartElemIdx, ntg);
+        applyNtg_(halfTrans2, outsideFaceIdx, outside.cartElemIdx, ntg);
+
+        Scalar trans;
+        if (std::abs(halfTrans1) < 1e-30 || std::abs(halfTrans2) < 1e-30)
+            // avoid division by zero
+            trans = 0.0;
+        else
+            trans = 1.0 / (1.0/halfTrans1 + 1.0/halfTrans2);
+
+        // apply the full face transmissibility multipliers
+        // for the inside ...
+        //
+        // The MULTZ needs special case if the option is ALL
+        // Then the smallest multiplier is applied.
+        // Default is to apply the top and bottom multiplier
+        bool useSmallestMultiplier = eclGrid.getMultzOption() == Opm::PinchMode::ModeEnum::ALL;
+        if (useSmallestMultiplier)
+            applyAllZMultipliers_(trans, insideFaceIdx, inside.cartElemIdx, outside.cartElemIdx, transMult, cartDims);
+        else
+            applyMultipliers_(trans, insideFaceIdx, inside.cartElemIdx, transMult);
+        // ... and outside elements
+        applyMultipliers_(trans, outsideFaceIdx, outside.cartElemIdx, transMult);
+
+        // apply the region multipliers (cf. the MULTREGT keyword)
+        Opm::FaceDir::DirEnum faceDir;
+        switch (insideFaceIdx) {
+        case 0:
+        case 1:
+            faceDir = Opm::FaceDir::XPlus;
+            break;
+
+        case 2:
+        case 3:
+            faceDir = Opm::FaceDir::YPlus;
+            break;
+
+        case 4:
+        case 5:
+            faceDir = Opm::FaceDir::ZPlus;
+            break;
+
+        default:
+            OPM_THROW(std::logic_error, "Could not determine a face direction");
+        }
+
+        trans *= transMult.getRegionMultiplier(inside.cartElemIdx,
+                                               outside.cartElemIdx,
+                                               faceDir);
+
+        trans_[isId_(inside.elemIdx, outside.elemIdx)] = trans;
     }
 
     DimVector distanceVector_(const DimVector& center,
