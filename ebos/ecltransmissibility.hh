@@ -49,9 +49,12 @@
 #include <dune/common/fmatrix.hh>
 
 #include <array>
-#include <vector>
+#include <cmath>
+#include <cstddef>
+#include <type_traits>
 #include <unordered_map>
 #include <utility>
+#include <vector>
 
 BEGIN_PROPERTIES
 
@@ -138,7 +141,10 @@ public:
 
         const std::vector<double> ntg = this->prepareTranCalc_(numElements);
 
-        this->computeTrans_NewTran_(gridView, elemMapper, numElements, ntg);
+        if (! this->gridIsRadial_())
+            this->computeTrans_NewTran_(gridView, elemMapper, numElements, ntg);
+        else
+            this->computeTrans_OldTran_Radial_(gridView, elemMapper, numElements, ntg);
     }
 
     /*!
@@ -192,6 +198,278 @@ private:
 
         unsigned int elemIdx;
         unsigned int cartElemIdx;
+    };
+
+    /*!
+     * Compute radial transmissibilities assuming fully matching RADIAL
+     * grids.
+     */
+    class OldTran_Radial
+    {
+    public:
+        explicit OldTran_Radial(EclTransmissibility& host)
+            : host_(host)
+        {}
+
+        void computeTrans(const GridView& gridView,
+                          const ElementMapper& elemMapper,
+                          const unsigned int numElements,
+                          const std::vector<double>& ntg)
+        {
+            const auto hTrans =
+                this->computeHalfTrans_(gridView, elemMapper, numElements);
+
+            this->computeFullTrans_(gridView, elemMapper, hTrans, ntg);
+        }
+
+    private:
+        template <typename T>
+        struct RemoveCVR
+        {
+            using type = typename std::remove_cv<
+                typename std::remove_reference<T>::type
+                >::type;
+        };
+
+        template <typename T>
+        using RemoveCVR_t = typename RemoveCVR<T>::type;
+
+        using ECLGridType = RemoveCVR_t<
+            decltype(std::declval<Vanguard>().eclState().getInputGrid())>;
+
+        using CartMapper = RemoveCVR_t<
+            decltype(std::declval<Vanguard>().cartesianIndexMapper())>;
+
+        using TransMultiplier = RemoveCVR_t<
+            decltype(std::declval<Vanguard>().eclState().getTransMult())>;
+
+        EclTransmissibility& host_;
+
+        std::vector<double> angleChangeVector_() const
+        {
+            auto dtheta = std::vector<double>{};
+
+            const auto& eclGrid = this->eclGrid_();
+
+            auto pointAngleDeg =
+                [&eclGrid](const std::size_t j, const std::size_t c) -> double
+            {
+                const double r2d =
+                    180.0 / 3.14159265358979323846264338327950288;
+
+                const auto& p = eclGrid.getCornerPos(0, j, 0, c);
+
+                return r2d * std::atan2(p[1], p[0]);
+            };
+
+            const auto ny = eclGrid.getNY();
+
+            dtheta.reserve(ny);
+
+            // Angle increases in the clockwise direction.
+            double t2 = pointAngleDeg(0, 0);
+            for (auto j = 0*ny; j < ny; ++j) {
+                const double t1 = t2;
+                t2 = pointAngleDeg(j, 1);
+
+                if (t2 > t1)
+                    // We crossed (-\infty, 0) real line; unwrap.
+                    t2 -= 360.0;
+
+                dtheta.push_back(- (t2 - t1));
+            }
+
+            return dtheta;
+        }
+
+        std::vector<double> radiusVector_() const
+        {
+            auto radii = std::vector<double>{};
+
+            const auto& eclGrid = this->eclGrid_();
+
+            auto pointRadius =
+                [&eclGrid](const std::size_t i, const std::size_t c) -> double
+            {
+                const auto& p = eclGrid.getCornerPos(i, 0, 0, c);
+                return std::hypot(p[0], p[1]);
+            };
+
+            // This code relies on the fact that local corner 0 is on the
+            // inner plane (minimum radius) while local corner 1 is on the
+            // outer plane (maximum radius).
+
+            const auto nx = eclGrid.getNX();
+
+            radii.reserve(nx + 1);
+            radii.push_back(pointRadius(0, 0));
+
+            for (auto i = 0*nx; i < nx; ++i)
+                radii.push_back(pointRadius(i, 1));
+
+            return radii;
+        }
+
+        std::vector<double> thicknessVector_() const
+        {
+            auto dz = std::vector<double>{};
+
+            const auto& eclGrid = this->eclGrid_();
+
+            auto pointDepth =
+                [&eclGrid](const std::size_t k, const std::size_t c) -> double
+            {
+                const auto& p = eclGrid.getCornerPos(0, 0, k, c);
+                return p[2];
+            };
+
+            const auto nz = eclGrid.getNY();
+
+            dz.reserve(nz);
+
+            double z2 = pointDepth(0, 0);
+            for (auto k = 0*nz; k < nz; ++k) {
+                const double z1 = z2;
+
+                z2 = pointDepth(k, 4);
+
+                dz.push_back(z2 - z1);
+            }
+
+            return dz;
+        }
+
+        const ECLGridType& eclGrid_() const
+        {
+            return this->host_.vanguard_.eclState().getInputGrid();
+        }
+
+        const CartMapper& cartMapper_() const
+        {
+            return this->host_.vanguard_.cartesianIndexMapper();
+        }
+
+        const TransMultiplier& transMult_() const
+        {
+            return this->host_.vanguard_.eclState().getTransMult();
+        }
+
+        std::vector<Scalar>
+        computeHalfTrans_(const GridView& gridView,
+                          const ElementMapper& elemMapper,
+                          const unsigned int numElements) const
+        {
+            // Fully matching radial grid => each element (cell) has exactly
+            // six faces/connections/intersections.
+            const auto facesPerElm = 6 + 0*numElements;
+            auto hTrans = std::vector<Scalar>(numElements * facesPerElm);
+
+            const auto& cartMapper = this->cartMapper_();
+
+            const auto R      = this->radiusVector_();
+            const auto dTheta = this->angleChangeVector_();
+            const auto dZ     = this->thicknessVector_();
+
+            for (auto elemIt    = gridView.template begin</*codim=*/ 0>(),
+                      elemEndIt = gridView.template end</*codim=*/ 0>();
+                 elemIt != elemEndIt; ++elemIt)
+            {
+                const auto E = EntityID(*elemIt, elemMapper, cartMapper);
+
+                auto ijk = std::array<int,3>{};
+                cartMapper.cartesianCoordinate(E.elemIdx, ijk);
+
+                const auto& K = this->host_.permeability_[E.elemIdx];
+
+                const auto r1 = R[ijk[0] + 0];  // Inner
+                const auto r2 = R[ijk[0] + 1];  // Outer
+                const auto dt = dTheta[ijk[1]]; // Degrees
+                const auto dz = dZ[ijk[2]];
+
+                const auto log_r2r1 = std::log(r2 / r1);
+                const auto r12 = r1 * r1;
+                const auto r22 = r2 * r2;
+
+                auto* hT = &hTrans[E.elemIdx*facesPerElm + 0];
+
+                // Radial direction.
+                {
+                    const auto half = 1.0 / 2.0;
+
+                    const auto tR_num = K[0][0] * dt * dz;
+
+                    const auto D_inner =
+                        (r22 / (r22 - r12))*log_r2r1 - half;
+
+                    const auto D_outer =
+                        half - (r12 / (r22 - r12))*log_r2r1;
+
+                    // R- (centre towards inner radius).
+                    hT[0] = tR_num / D_inner;
+
+                    // R+ (centre towards outer radius).
+                    hT[1] = tR_num / D_outer;
+                }
+
+                // Azimuthal direction (symmetric).
+                hT[2] = hT[3] = 2 * K[1][1] * dz * log_r2r1 / dt;
+
+                // Vertical direction (symmetric).
+                hT[4] = hT[5] = K[2][2] * dt * (r22 - r12) / dz;
+            }
+
+            return hTrans;
+        }
+
+        void computeFullTrans_(const GridView& gridView,
+                               const ElementMapper& elemMapper,
+                               const std::vector<Scalar>& hTrans,
+                               const std::vector<double>& ntg)
+        {
+            const auto facesPerElem = 0*hTrans.size() + 6;
+
+            const auto& cartMapper = this->cartMapper_();
+            const auto& transMult = this->transMult_();
+
+            for (auto elemIt    = gridView.template begin</*codim=*/ 0>(),
+                      elemEndIt = gridView.template end</*codim=*/ 0>();
+                 elemIt != elemEndIt; ++elemIt)
+            {
+                const auto& elem = *elemIt;
+                const auto inside = EntityID(elem, elemMapper, cartMapper);
+
+                const auto* hTi = &hTrans[inside.elemIdx*facesPerElem + 0];
+
+                for (auto isIt    = gridView.ibegin(elem),
+                          isEndIt = gridView.iend(elem);
+                     isIt != isEndIt; ++isIt)
+                {
+                    const auto& intersection = *isIt;
+
+                    if (! intersection.neighbor())
+                        continue;
+
+                    const auto outside = EntityID(intersection.outside(),
+                                                  elemMapper, cartMapper);
+
+                    if (inside.elemIdx > outside.elemIdx)
+                        continue;
+
+                    const auto* hTo = &hTrans[outside.elemIdx*facesPerElem + 0];
+                    const unsigned insideFaceIdx = intersection.indexInInside();
+                    const unsigned outsideFaceIdx = intersection.indexInOutside();
+
+                    auto halfTrans1 = hTi[insideFaceIdx];
+                    auto halfTrans2 = hTo[outsideFaceIdx];
+
+                    this->host_.computeFullTrans_(std::move(halfTrans1),
+                                                  std::move(halfTrans2),
+                                                  inside, insideFaceIdx,
+                                                  outside, outsideFaceIdx,
+                                                  transMult, ntg);
+                }
+            }
+        }
     };
 
     std::vector<double> prepareTranCalc_(const unsigned numElements)
@@ -1015,6 +1293,27 @@ private:
     bool gridIsRadial_(std::true_type /* CpGrid */) const
     {
         return this->vanguard_.eclState().getInputGrid().isRadial();
+    }
+
+
+    void computeTrans_OldTran_Radial_(std::false_type /* !CpGrid */,
+                                      const GridView& /* gridView */,
+                                      const ElementMapper& /* elemMapper */,
+                                      const unsigned int /* numElements*/,
+                                      const std::vector<double>& /* ntg */)
+    {
+    }
+
+
+    void computeTrans_OldTran_Radial_(std::true_type /* CpGrid */,
+                                      const GridView& gridView,
+                                      const ElementMapper& elemMapper,
+                                      const unsigned int numElements,
+                                      const std::vector<double>& ntg)
+    {
+        OldTran_Radial calc(*this);
+
+        calc.computeTrans(gridView, elemMapper, numElements, ntg);
     }
 
 
